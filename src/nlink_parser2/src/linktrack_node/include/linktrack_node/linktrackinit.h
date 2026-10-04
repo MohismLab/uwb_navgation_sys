@@ -6,6 +6,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include "std_msgs/msg/string.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -55,6 +56,9 @@ private:
     std::unordered_map<uint8_t, rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr> tag_pose_pubs_;
     std::string pose_topic_prefix_;
     std::string tag_name_prefix_;
+    std::map<uint8_t, std::string> tag_names_;  // tag id -> robot name (uwb_tags.yaml)
+    std::set<uint8_t> ignored_tags_;            // unmapped ids already warned about
+    bool publish_unmapped_ = false;
     std::string pose_frame_id_;
 
     // anchor coordinates read from the module (Setting_Frame0), published as RViz models

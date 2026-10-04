@@ -47,8 +47,9 @@ UWB 基站解算每个标签（机器人）的位置，经 EKF 平滑后发布�
     │   │   ├── linktrack.launch.py         只启动 UWB 驱动
     │   │   ├── linktrack.ekf.launch.py     UWB 驱动 + 每个机器人一套 EKF（日常使用）
     │   │   └── linktrack_aoa / tofsense*   官方的其他产品（未改动）
-    │   ├── config/uwb_ekf.yaml             robot_localization EKF 参数（2D、只融合 x/y）
-    │   ├── scripts/uwb_ekf_adapter.py      UWB 位姿 ⇄ EKF 的适配节点（掉线检测、重置、轨迹）
+    │   ├── config/uwb_tags.yaml            标签 id → 机器人名字（加机器人改这里）
+    │   ├── config/uwb_velocity.yaml        哪些机器人把自身速度融合进滤波（目前 dog_4）
+    │   ├── scripts/uwb_ekf_adapter.py      每个机器人的卡尔曼滤波（速度融合、掉线检测、重置、轨迹）
     │   ├── meshes/
     │   │   ├── uwb_anchor.dae              RViz 中的基站 3D 模型（三脚架 + 模块 + 天线）
     │   │   └── make_anchor_mesh.py         生成上面模型的脚本（改尺寸/颜色后重新运行）
@@ -65,10 +66,10 @@ UWB 基站解算每个标签（机器人）的位置，经 EKF 平滑后发布�
 
 ## 3. 安装与编译
 
-依赖：Ubuntu 22.04、ROS 2 Humble。
+依赖：Ubuntu 22.04、ROS 2 Humble（滤波在 `uwb_ekf_adapter.py` 内部，只需要 numpy，不再需要 robot_localization）。
 
 ```bash
-sudo apt install ros-humble-robot-localization python3-colcon-common-extensions
+sudo apt install python3-numpy python3-colcon-common-extensions
 
 mkdir -p ~/uwb_ws && cd ~/uwb_ws
 git clone --recursive git@github.com:MohismLab/uwb_navgation_sys.git .
@@ -106,21 +107,38 @@ ros2 launch nlink_parser2 linktrack.ekf.launch.py
 |---|---|---|
 | `port_name` | `/dev/ttyACM0` | 基站串口 |
 | `baud_rate` | `1000000` | 基站波特率（在 NAssistant 中设置） |
-| `robots` | `rm_0,rm_1,rm_2` | 需要 EKF 的机器人，逗号分隔 |
-| `uwb_std` | `0.05` | 送入 EKF 的 UWB 位置标准差 [m]，越大越平滑、跟随越慢 |
+| `tags_file` | `config/uwb_tags.yaml` | 标签 id → 机器人名字 的映射（见下）|
+| `robots` | 空 = 映射文件里的全部机器人 | 需要 EKF 的机器人，逗号分隔 |
+| `uwb_std` | `0.05` | 只用 UWB 时的位置标准差 [m]，越大越平滑、跟随越慢 |
+| `velocity_file` | `config/uwb_velocity.yaml` | 融合机器人自身速度的配置（见 `src/docs/interfaces.md`“速度融合”），`''` 为全部只用 UWB |
 | `floor_z` | `-1.75` | 地面在 UWB 坐标系中的高度 [m]（基站在 z=0）|
 
-例：只给 rm_0 和 dog_0 开 EKF
+例：只给 rm_0 和 dog_4 开 EKF
 
 ```bash
-ros2 launch nlink_parser2 linktrack.ekf.launch.py robots:=rm_0,dog_0
+ros2 launch nlink_parser2 linktrack.ekf.launch.py robots:=rm_0,dog_4
 ```
+
+#### 标签 → 机器人名字：`src/nlink_parser2/config/uwb_tags.yaml`
+
+```yaml
+/**:
+  ros__parameters:
+    tag_ids:   [0,      1,      2,      4]
+    tag_names: ["rm_0", "rm_1", "rm_2", "dog_4"]
+    publish_unmapped: false
+```
+
+- 标签 `tag_ids[i]` 发布为 `/uwb/<tag_names[i]>/pose`；EKF 默认给这里列出的每个机器人各开一套。
+- **加机器人只改这一个文件**（改完重新 `colcon build` 或用 `tags_file:=` 指向自己的文件，然后重启 launch）。
+- 没列出的标签**不发布**，日志对每个 id 警告一次——这也过滤掉了基站帧偶尔解析出的假标签（如 122、250–253）。
+  `publish_unmapped: true` 时没列出的标签按 `rm_<id>` 发布。
 
 只要原始 UWB、不要 EKF：`ros2 launch nlink_parser2 linktrack.launch.py`。
 
 启动后：
 
-- 每个出现的标签自动发布 `/uwb/<tag_name_prefix><id>/pose`（默认前缀 `rm_`，标签 id 1 → `/uwb/rm_1/pose`）。
+- 映射文件里的每个标签发布 `/uwb/<机器人名>/pose`（如标签 4 → `/uwb/dog_4/pose`）。
 - 启动 2 秒内向基站读取基站坐标（Setting_Frame0），日志打印 `anchor A0: (x, y, z)`，
   并在 `/uwb/anchors` 发布基站 3D 模型。未配置的基站槽位（-8388 m）会被过滤。
 - 每个机器人的 EKF 输出 `/uwb_ekf/<robot>/pose`、轨迹 `/uwb_ekf/<robot>/path`、名字标签 `/uwb_ekf/<robot>/label`。
@@ -181,7 +199,8 @@ Fixed Frame 设为 `uwb_floor`。
 |---|---|
 | 话题全是乱码 / 没有 `/uwb/...` | 波特率不对（应为 1000000），或串口无权限（`dialout` 组）|
 | 基站没显示 | 查看日志是否有 `anchor A0: ...`；读取请求最多重试 10 次（`no Setting_Frame0 answer`），确认串口没有被其他程序占用 |
-| 位置偶尔跳动 | UWB 多径 / 遮挡，EKF 的马氏距离门限会丢弃离群点；持续 1 m 以上的偏离会触发 EKF 重置 |
+| 位置偶尔跳动 | UWB 多径 / 遮挡，滤波的马氏距离门限会丢弃离群点；持续 1 m 以上的偏离会触发重置 |
+| 被遮挡时位置飘远又回来 | 某个基站被挡，测距连续偏长数秒，单靠 UWB 分不出来。机器人能提供自身速度时加入 `config/uwb_velocity.yaml`（dog_4 遮挡偏离 0.68 → 0.41 m）|
 | `/uwb_ekf/<robot>/pose` 不发布 | 该机器人的标签没有数据（`pose_valid` 为 false），检查标签供电和 id |
 | 本机 `ros2 topic list` 看不到别的机器 | `ros2 daemon stop && ros2 daemon start` |
 | 其他程序读不到航向 | `/uwb_ekf/<robot>/pose` 的 orientation 恒为单位四元数，`heading_valid` 为 false；航向见 `src/docs/interfaces.md` |
@@ -194,5 +213,5 @@ Fixed Frame 设为 `uwb_floor`。
 
 - 按标签 id 发布 `geometry_msgs/PoseStamped`（`/uwb/<prefix><id>/pose`）
 - 通过 Setting_Frame0 读取基站坐标并以 3D 模型发布到 `/uwb/anchors`（只在发出读请求后接收，防止数据流中的误判帧）
-- `linktrack.ekf.launch.py` + `uwb_ekf_adapter.py`：多机器人 EKF、掉线检测、重置、轨迹
+- `linktrack.ekf.launch.py` + `uwb_ekf_adapter.py`：多机器人卡尔曼滤波（可融合机器人自身速度）、掉线检测、重置、轨迹
 - 默认串口 `/dev/ttyACM0`、波特率 1000000

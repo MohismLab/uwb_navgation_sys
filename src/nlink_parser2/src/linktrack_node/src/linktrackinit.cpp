@@ -113,6 +113,23 @@ void Init::initTagPose()
     pose_topic_prefix_ = node_->declare_parameter<std::string>("pose_topic_prefix", "/uwb");
     tag_name_prefix_ = node_->declare_parameter<std::string>("tag_name_prefix", "rm_");
     pose_frame_id_ = node_->declare_parameter<std::string>("pose_frame_id", "world");
+
+    // tag id -> robot name (config/uwb_tags.yaml); tags not listed are dropped unless
+    // publish_unmapped, which names them <tag_name_prefix><id>
+    auto ids = node_->declare_parameter<std::vector<int64_t>>("tag_ids", std::vector<int64_t>{});
+    auto names = node_->declare_parameter<std::vector<std::string>>("tag_names", std::vector<std::string>{});
+    publish_unmapped_ = node_->declare_parameter<bool>("publish_unmapped", ids.empty());
+    if (ids.size() != names.size())
+    {
+        RCLCPP_ERROR(node_->get_logger(), "tag_ids (%zu) and tag_names (%zu) differ in length, mapping ignored",
+                     ids.size(), names.size());
+        return;
+    }
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+        tag_names_[static_cast<uint8_t>(ids[i])] = names[i];
+        RCLCPP_INFO(node_->get_logger(), "tag %ld -> %s", ids[i], names[i].c_str());
+    }
 }
 
 void Init::publishTagPose(uint8_t id, const float pos_3d[3])
@@ -121,7 +138,25 @@ void Init::publishTagPose(uint8_t id, const float pos_3d[3])
     auto it = tag_pose_pubs_.find(id);
     if (it == tag_pose_pubs_.end())
     {
-        auto topic = pose_topic_prefix_ + "/" + tag_name_prefix_ + std::to_string(id) + "/pose";
+        std::string name;
+        auto mapped = tag_names_.find(id);
+        if (mapped != tag_names_.end())
+        {
+            name = mapped->second;
+        }
+        else if (publish_unmapped_)
+        {
+            name = tag_name_prefix_ + std::to_string(id);
+        }
+        else
+        {
+            if (ignored_tags_.insert(id).second)
+            {
+                RCLCPP_WARN(node_->get_logger(), "tag %u is not in tag_ids (uwb_tags.yaml), not published", id);
+            }
+            return;
+        }
+        auto topic = pose_topic_prefix_ + "/" + name + "/pose";
         it = tag_pose_pubs_.emplace(id, node_->create_publisher<geometry_msgs::msg::PoseStamped>(topic, 10)).first;
         RCLCPP_INFO(node_->get_logger(), "tag %u pose -> %s", id, topic.c_str());
     }

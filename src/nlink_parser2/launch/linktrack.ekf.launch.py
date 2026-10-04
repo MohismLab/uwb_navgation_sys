@@ -1,14 +1,16 @@
-"""LinkTrack + EKF smoothing of the UWB tags, one EKF per robot.
+"""LinkTrack + Kalman filtering of the UWB tags, one filter (uwb_ekf_adapter.py) per robot.
 
-  /uwb/<robot>/pose -> robot_localization ekf_node -> /uwb_ekf/<robot>/pose
+  /uwb/<robot>/pose [+ robot velocity, config/uwb_velocity.yaml] -> /uwb_ekf/<robot>/pose
 
-  ros2 launch nlink_parser2 linktrack.ekf.launch.py                     # rm_0, rm_1, rm_2
+  ros2 launch nlink_parser2 linktrack.ekf.launch.py                     # robots of config/uwb_tags.yaml
   ros2 launch nlink_parser2 linktrack.ekf.launch.py robots:=rm_0 uwb_std:=0.08
-
-Needs robot_localization (sudo apt install ros-humble-robot-localization).
+  ros2 launch nlink_parser2 linktrack.ekf.launch.py tags_file:=/path/to/uwb_tags.yaml
+  ros2 launch nlink_parser2 linktrack.ekf.launch.py velocity_file:=''   # UWB position only
 """
 
 import os
+
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -18,30 +20,38 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def ekf_per_robot(context):
-    share = get_package_share_directory('nlink_parser2')
+def robot_names(context):
+    """robots:=a,b,c, or by default every tag_names entry of the tags file."""
     robots = [r.strip() for r in LaunchConfiguration('robots').perform(context).split(',') if r.strip()]
+    if robots:
+        return robots
+    with open(LaunchConfiguration('tags_file').perform(context)) as f:
+        params = next(iter(yaml.safe_load(f).values()))['ros__parameters']
+    return list(params.get('tag_names', []))
+
+
+def velocity_sources(context):
+    """robot -> {velocity_topic, heading_topic[, heading_offset]} of the velocity file"""
+    path = LaunchConfiguration('velocity_file').perform(context)
+    if not path:
+        return {}
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+def ekf_per_robot(context):
+    vel = velocity_sources(context)
     nodes = []
-    for robot in robots:
-        nodes += [
-            # namespaced so its set_pose / odometry/filtered topics do not collide with other
-            # robot_localization instances on the network
-            Node(
-                package='robot_localization',
-                executable='ekf_node',
-                name='ekf',
-                namespace=f'/uwb_ekf/{robot}',
-                output='screen',
-                parameters=[os.path.join(share, 'config', 'uwb_ekf.yaml')],
-            ),
-            Node(
-                package='nlink_parser2',
-                executable='uwb_ekf_adapter.py',
-                output='screen',
-                arguments=['--robot', robot, '--std', LaunchConfiguration('uwb_std'),
-                           '--floor-z', LaunchConfiguration('floor_z')],
-            ),
-        ]
+    for robot in robot_names(context):
+        args = ['--robot', robot, '--std', LaunchConfiguration('uwb_std'),
+                '--floor-z', LaunchConfiguration('floor_z')]
+        src = vel.get(robot)
+        if src:
+            args += ['--vel-topic', src['velocity_topic'], '--heading-topic', src['heading_topic']]
+            if src.get('heading_offset') is not None:
+                args += ['--heading-offset', str(src['heading_offset'])]
+        nodes.append(Node(package='nlink_parser2', executable='uwb_ekf_adapter.py', output='screen',
+                          arguments=args))
     return nodes
 
 
@@ -51,10 +61,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('port_name', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baud_rate', default_value='1000000'),
-        DeclareLaunchArgument('robots', default_value='rm_0,rm_1,rm_2',
-                              description='comma separated tag names, /uwb/<robot>/pose'),
+        DeclareLaunchArgument('tags_file', default_value=os.path.join(share, 'config', 'uwb_tags.yaml'),
+                              description='tag id -> robot name mapping'),
+        DeclareLaunchArgument('robots', default_value='',
+                              description='comma separated robot names for the EKF, default: all of tags_file'),
+        DeclareLaunchArgument('velocity_file', default_value=os.path.join(share, 'config', 'uwb_velocity.yaml'),
+                              description="robots whose body velocity is fused, '' for none"),
         DeclareLaunchArgument('uwb_std', default_value='0.05',
-                              description='UWB position std fed to the EKF [m]'),
+                              description='UWB position std of the filter without velocity [m]'),
         DeclareLaunchArgument('floor_z', default_value='-1.75',
                               description='floor height in the UWB frame (anchors are at z=0) [m]'),
 
@@ -73,6 +87,7 @@ def generate_launch_description():
             launch_arguments={
                 'port_name': LaunchConfiguration('port_name'),
                 'baud_rate': LaunchConfiguration('baud_rate'),
+                'tags_file': LaunchConfiguration('tags_file'),
             }.items(),
         ),
 

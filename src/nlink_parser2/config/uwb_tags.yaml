@@ -1,0 +1,11 @@
+# UWB tag id -> robot name. The tag with id tag_ids[i] is published as
+# /uwb/<tag_names[i]>/pose, and linktrack.ekf.launch.py starts one EKF per name.
+#
+# Tags that are not listed are NOT published (a warning is logged once per id): this also
+# drops the bogus ids (e.g. 122, 250-253) that a corrupted AnchorFrame0 occasionally decodes to.
+# publish_unmapped: true publishes them anyway as <tag_name_prefix><id>.
+/**:
+  ros__parameters:
+    tag_ids:   [0,      1,      2,      4]
+    tag_names: ["rm_0", "rm_1", "rm_2", "dog_4"]
+    publish_unmapped: false
