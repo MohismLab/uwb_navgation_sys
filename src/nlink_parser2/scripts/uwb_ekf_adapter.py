@@ -2,16 +2,19 @@
 """Kalman filter of one robot's UWB position, optionally aided by the robot's own velocity.
 
   /uwb/<robot>/pose (PoseStamped, raw UWB)
-      -> /uwb_ekf/<robot>/pose (PoseStamped, filtered, on the floor)
-      -> /uwb_ekf/<robot>/odometry/filtered (Odometry, position + velocity in the UWB frame)
+      -> /uwb_ekf/<robot>/pose (PoseStamped, filtered, on the floor; orientation: heading, see below)
+      -> /uwb_ekf/<robot>/odometry/filtered (Odometry, same pose + velocity in the UWB frame)
       -> /uwb_ekf/<robot>/path (Path, last --history seconds, for RViz)
       -> /uwb_ekf/<robot>/label (Marker, robot name above it, for RViz)
-      -> /uwb_ekf/<robot>/heading_valid (Bool, latched): false, pose.orientation is identity
+      -> /uwb_ekf/<robot>/heading_valid (Bool, latched): pose.orientation is the yaw of the body +x
+         (cmd_vel frame) in the UWB frame, heading_offset - IMU yaw; false: orientation is identity.
+         True while the IMU heading is fresh (1.5 s) and its magnetometer was LOCKED within 60 s
       -> /uwb_ekf/<robot>/pose_valid (Bool, latched): false while no raw pose for --timeout s;
          pose / path / label are not published then
-  optional, --vel-topic and --heading-topic:
-  /<robot>/odom/twist (TwistStamped, body frame: x forward, y left) + /<robot>/odometry/filtered
-  (Odometry, IMU heading, ENU from magnetic east) -> fused velocity measurement
+  optional, --vel-topic, --heading-topic, --mag-state-topic:
+  /<robot>/odom/twist or /rm_N/vel (TwistStamped, body frame rotated by --velocity-rotation)
+  + /<robot>/odometry/filtered (Odometry, IMU heading, ENU from magnetic east)
+  + /<robot>/imu/mag_state (String, LOCKED / HOLD / REJECTED) -> fused velocity, heading
       -> /uwb_ekf/<robot>/heading_offset (Float32, deg, latched): the offset in use
 
 Filter: x y vx vy ax ay, constant acceleration, process noise Q * dt, x/y measurements with a
@@ -55,6 +58,11 @@ VEL_STD = 0.08            # body velocity measurement std [m/s]
 VEL_TIMEOUT = 1.0         # s without velocity -> back to POS_ONLY (WiFi drops them for up to ~1 s)
 HEADING_TIMEOUT = 0.5     # s without IMU heading -> only standstill is used
 STILL_SPEED = 0.02        # m/s, below it the robot stands still (fused without heading)
+# heading_valid: IMU heading fresh and its magnetometer LOCKED within this time. Short rejections keep
+# the heading (the gyro bias is removed on the robots: dog_4 stayed within ~4 deg through 100 s of
+# rejection), a magnetic reference never established or a long rejection does not
+HEADING_LOCK_TIMEOUT = 60.0   # s
+HEADING_VALID_TIMEOUT = 1.5   # s without IMU heading before heading_valid drops (WiFi gaps reach ~0.7 s)
 
 MIRROR = np.diag([1.0, -1.0])
 
@@ -202,7 +210,7 @@ class Tracker:
     """Filter + reset logic for one robot, fed with timestamped events (ROS node and replay)."""
 
     def __init__(self, timeout=0.5, reset_distance=1.0, reset_time=0.1, reset_time_vel=1.0,
-                 heading_offset=None):
+                 heading_offset=None, velocity_rotation=0.0):
         self.f = UwbFilter()
         self.timeout = timeout
         self.reset_distance = reset_distance
@@ -212,6 +220,9 @@ class Tracker:
         # estimate keeps running as a check of the configured value (it is not applied)
         self.offset0 = None if heading_offset is None else math.radians(heading_offset)
         self.estimate = HeadingOffset()
+        # the velocity topic is the body velocity rotated by velocity_rotation (RoboMaster /vel: 180 deg)
+        self.vel_unrotate = rot(-math.radians(velocity_rotation))
+        self.last_locked = None        # last magnetometer LOCKED of the IMU
         self.last_uwb = None
         self.last_vel = None
         self.yaw = None                # IMU heading (ENU) and its time
@@ -249,9 +260,22 @@ class Tracker:
     def on_heading(self, t, yaw):
         self.yaw, self.t_yaw = yaw, t
 
-    def on_velocity(self, t, v_body):
-        """body velocity (x forward, y left); returns False when it could not be used"""
-        v_body = np.asarray(v_body, float)
+    def on_mag_state(self, t, state):
+        if state == 'LOCKED':
+            self.last_locked = t
+
+    def heading(self, t):
+        """(yaw of the body +x in the UWB frame [rad], trusted) or (None, False)"""
+        if self.offset0 is None or self.yaw is None or t - self.t_yaw > HEADING_VALID_TIMEOUT:
+            return None, False
+        psi = math.remainder(self.offset0 - self.yaw, 2 * math.pi)
+        locked = self.last_locked is not None and t - self.last_locked <= HEADING_LOCK_TIMEOUT
+        return psi, locked
+
+    def on_velocity(self, t, v_topic):
+        """velocity as the robot publishes it (body frame rotated by velocity_rotation);
+        returns False when it could not be used"""
+        v_body = self.vel_unrotate @ np.asarray(v_topic, float)
         if np.hypot(*v_body) < STILL_SPEED:
             self.still_since = t if self.still_since is None else self.still_since
         else:
@@ -314,7 +338,7 @@ def main():
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
     from rclpy.signals import SignalHandlerOptions
-    from std_msgs.msg import Bool, Float32
+    from std_msgs.msg import Bool, Float32, String
     from visualization_msgs.msg import Marker
 
     class UwbEkfAdapter(Node):
@@ -328,7 +352,8 @@ def main():
             self.path_len = int(args.history * 10)
             self.last_path_t = 0.0
             offset = self.args_offset = args.heading_offset
-            self.tr = Tracker(args.timeout, args.reset_distance, args.reset_time, args.reset_time_vel, offset)
+            self.tr = Tracker(args.timeout, args.reset_distance, args.reset_time, args.reset_time_vel, offset,
+                              args.velocity_rotation)
             self.published_offset = None
             POS_ONLY['std'] = args.std
             self.pose_pub = self.create_publisher(PoseStamped, f'{ns}/pose', 10)
@@ -337,9 +362,10 @@ def main():
             self.label_pub = self.create_publisher(Marker, f'{ns}/label', 10)
             latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
-            # latched: true only once pose.orientation carries a real heading in the UWB frame
+            # latched: true while pose.orientation carries the heading in the UWB frame (identity otherwise)
             self.heading_valid_pub = self.create_publisher(Bool, f'{ns}/heading_valid', latched)
             self.heading_valid_pub.publish(Bool(data=False))
+            self.heading_valid = False
             # latched: false while the tag is silent (powered off, out of range); nothing is published then
             self.pose_valid_pub = self.create_publisher(Bool, f'{ns}/pose_valid', latched)
             self.pose_valid = None
@@ -348,6 +374,9 @@ def main():
                 self.offset_pub = self.create_publisher(Float32, f'{ns}/heading_offset', latched)
                 self.create_subscription(TwistStamped, args.vel_topic, self.on_vel, qos_profile_sensor_data)
                 self.create_subscription(Odometry, args.heading_topic, self.on_heading, qos_profile_sensor_data)
+                if args.mag_state_topic:
+                    self.create_subscription(String, args.mag_state_topic,
+                                             lambda m: self.tr.on_mag_state(self.now(), m.data), qos_profile_sensor_data)
                 self.vel_used = None
                 self.create_timer(0.5, self.check_heading_offset)
                 self.get_logger().info(f'{args.vel_topic} + {args.heading_topic} fused, heading offset '
@@ -376,6 +405,12 @@ def main():
                                        throttle_duration_sec=60.0)
 
         def check_fresh(self):
+            _, hv = self.tr.heading(self.now())
+            if hv != self.heading_valid:
+                self.heading_valid = hv
+                self.heading_valid_pub.publish(Bool(data=hv))
+                self.get_logger().info('heading valid' if hv else
+                                       'heading not valid (no IMU heading, offset or recent magnetometer lock)')
             valid = self.tr.fresh(self.now())
             if valid != self.pose_valid:
                 self.pose_valid = valid
@@ -410,8 +445,12 @@ def main():
             out.header.frame_id = self.frame
             out.pose.position.x, out.pose.position.y = float(x[0]), float(x[1])
             out.pose.position.z = self.floor_z
-            # UWB gives no heading: identity orientation, heading_valid (false) says so
-            out.pose.orientation.w = 1.0
+            # heading of the body +x in the UWB frame when trusted, identity otherwise (heading_valid)
+            psi, hv = self.tr.heading(self.now())
+            if hv:
+                out.pose.orientation.z, out.pose.orientation.w = math.sin(psi / 2), math.cos(psi / 2)
+            else:
+                out.pose.orientation.w = 1.0
             self.pose_pub.publish(out)
 
             odom = Odometry()
@@ -464,7 +503,10 @@ def main():
     p.add_argument('--vel-topic', default='', help='body velocity (TwistStamped), e.g. /dog_4/odom/twist')
     p.add_argument('--heading-topic', default='', help='IMU heading (Odometry), e.g. /dog_4/odometry/filtered')
     p.add_argument('--heading-offset', type=float, default=None,
-                   help='start value of the heading offset [deg] (~/.ros/uwb_heading_offset_<robot>.yaml wins)')
+                   help='heading of the body +x in the UWB frame = offset - IMU yaw [deg]')
+    p.add_argument('--velocity-rotation', type=float, default=0.0,
+                   help='the velocity topic is the body velocity rotated by this [deg] (RoboMaster /vel: 180)')
+    p.add_argument('--mag-state-topic', default='', help='IMU magnetometer state (String), e.g. /dog_4/imu/mag_state')
     args = p.parse_args(rclpy.utilities.remove_ros_args(sys.argv)[1:])
 
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)

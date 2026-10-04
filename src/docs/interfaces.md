@@ -7,12 +7,12 @@
 | 话题 | 类型 | QoS | 说明 |
 |---|---|---|---|
 | `/uwb/<robot>/pose` | `geometry_msgs/PoseStamped` | reliable, depth 10 | 原始 UWB 位置，约 50 Hz，`frame_id: world`。orientation 无意义（单位四元数）。z 噪声很大，只用 x/y |
-| `/uwb_ekf/<robot>/pose` | `geometry_msgs/PoseStamped` | reliable, depth 10 | EKF 平滑后的位置，`frame_id: world`，z 固定为地面高度 `floor_z`。**`pose_valid` 为 false 时不发布** |
+| `/uwb_ekf/<robot>/pose` | `geometry_msgs/PoseStamped` | reliable, depth 10 | 滤波后的位置，`frame_id: world`，z 固定为地面高度 `floor_z`。**`pose_valid` 为 false 时不发布**。orientation：`heading_valid` 为 true 时是绕 z 轴的航向（机体 +x，即 cmd_vel 坐标系，在 UWB 坐标系中的朝向），否则为单位四元数 |
 | `/uwb_ekf/<robot>/pose_valid` | `std_msgs/Bool` | reliable + **transient_local**, depth 1 | 原始位置超过 0.5 s 没更新时为 false，恢复后为 true；只在变化时发布 |
-| `/uwb_ekf/<robot>/heading_valid` | `std_msgs/Bool` | reliable + **transient_local**, depth 1 | 目前恒为 false：`/uwb_ekf/<robot>/pose` 的 orientation 恒为单位四元数，**不是航向**。将来写入真实航向后会变为 true，届时 orientation 表示 UWB 坐标系中车体 +x 的方向 |
+| `/uwb_ekf/<robot>/heading_valid` | `std_msgs/Bool` | reliable + **transient_local**, depth 1 | true：`pose` / `odometry/filtered` 的 orientation 是航向 `heading_offset − yaw_imu`。条件：配置了 `heading_offset`、IMU 航向 1.5 s 内有更新、`/<robot>/imu/mag_state` 60 s 内出现过 `LOCKED`（短暂拒收仍可信：陀螺零偏已扣除；从未建立地磁参考或长时间拒收则为 false）。只在变化时发布 |
 | `/uwb_ekf/<robot>/path` | `nav_msgs/Path` | reliable, depth 10 | 最近 30 s 轨迹，10 Hz；EKF 重置时清空 |
 | `/uwb_ekf/<robot>/label` | `visualization_msgs/Marker` | reliable, depth 10 | 机器人名字文字，生命周期 1 s |
-| `/uwb_ekf/<robot>/odometry/filtered` | `nav_msgs/Odometry` | reliable, depth 10 | 和 `pose` 同时发布（同样在 `pose_valid` 为 false 时不发布）：位置 + **UWB 坐标系下的速度**（`twist.linear.x/y`，m/s）及其协方差。orientation 同样恒为单位四元数 |
+| `/uwb_ekf/<robot>/odometry/filtered` | `nav_msgs/Odometry` | reliable, depth 10 | 和 `pose` 同时发布（同样在 `pose_valid` 为 false 时不发布）：位置 + **UWB 坐标系下的速度**（`twist.linear.x/y`，m/s）及其协方差。orientation 与 `pose` 相同 |
 | `/uwb_ekf/<robot>/heading_offset` | `std_msgs/Float32` | reliable + **transient_local**, depth 1 | 只有融合速度的机器人有：当前使用的航向偏移 [deg]，见下方“速度融合” |
 | `/uwb/anchors` | `visualization_msgs/MarkerArray` | reliable, depth 10 | 基站 3D 模型 + 名字，1 Hz 重发，生命周期 3 s，`frame_id: world` |
 | `/nlink_linktrack_anchorframe0` | `nlink_parser2/LinktrackAnchorframe0` | reliable, depth 200 | 基站原始帧（标签位置 + 到各基站的距离）|
@@ -31,6 +31,7 @@
 | `heading_topic`，如 `/dog_4/odometry/filtered` | `nav_msgs/Odometry` | 机器人外置 IMU 的地磁航向 |
 
 换算：`v_uwb = Rot(heading_offset − yaw_imu) · diag(1, −1) · v_body`（UWB 坐标系是镜像的）。
+`v_body` 是机体坐标系（cmd_vel 坐标系）速度；话题本身转了角度的用 `velocity_rotation` 说明（RM 的 `/rm_N/vel` 为 180°）。
 `heading_offset` 按机器人不同（IMU 安装方向、磁北与 UWB 轴的夹角），写在配置文件里，运行中不修改。
 **标定（不需要动捕）**：配置里不写 `heading_offset`，让机器人走十几段 0.5 m 以上的直线，适配节点用
 UWB 位移对比里程计积分估出偏移并打印 `heading offset estimated from straight drives: …`，把这个值写进配置。

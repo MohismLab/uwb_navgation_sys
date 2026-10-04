@@ -3,7 +3,11 @@
 #
 #   velocity_topic   geometry_msgs/TwistStamped, body frame (x forward, y left)
 #   heading_topic    nav_msgs/Odometry with the robot's IMU heading (ENU from magnetic east)
-#   heading_offset   [deg] the offset in
+#   mag_state_topic  its magnetometer state (default /<robot>/imu/mag_state): heading_valid needs a
+#                    LOCKED within the last 60 s
+#   velocity_rotation [deg] the velocity topic is the body velocity rotated by this (default 0)
+#   heading_offset   [deg] heading of the body +x (cmd_vel frame) in the UWB frame = heading_offset - yaw_imu,
+#                    published as the orientation of /uwb_ekf/<robot>/pose; velocities go into the UWB frame as
 #                        v_uwb = Rot(heading_offset - yaw_imu) * diag(1, -1) * v_body
 #                    leave it out when unknown: it is then estimated once from ~15 straight drives
 #                    (0.5 m+ each) and logged, put the logged value here. It is not refined
@@ -18,19 +22,22 @@ dog_4:
   heading_offset: 61.5                        # against mocap with the gyro bias removed (2026-10-05)
 
 # RoboMasters: /rm_N/vel is the chassis velocity as the CAN bridge reports it (robomaster_can_ros_bridge
-# sensing.cpp copies vbx/vby, cmd_vel goes out as send_speed(-x, -y, -wz)): it is the body velocity
-# rotated by 180 deg (measured -174.6 / +176.2 deg, scale ~1, not mirrored; 2026-10-05).
-# heading_offset = GUI's theta + delta (learned from cmd_vel drives, no mocap) + 180 deg;
-# rm_2 cross-checked from straight drives: 238.5 deg (GUI 235.5 after its mag-gated relearning).
+# sensing.cpp copies vbx/vby, cmd_vel goes out as send_speed(-x, -y, -wz)): the body velocity rotated by
+# 180 deg (measured -174.6 / +176.2 deg, scale ~1, not mirrored; 2026-10-05).
+# heading_offset = the GUI's theta + delta, learned from cmd_vel drives (no mocap); rm_2 cross-checked
+# from straight drives: 58.5 deg.
 rm_0:
   velocity_topic: /rm_0/vel
   heading_topic: /rm_0/odometry/filtered
-  heading_offset: 240.0
+  velocity_rotation: 180.0
+  heading_offset: 59.97
 rm_1:
   velocity_topic: /rm_1/vel
   heading_topic: /rm_1/odometry/filtered
-  heading_offset: 242.0
+  velocity_rotation: 180.0
+  heading_offset: 61.96
 rm_2:
   velocity_topic: /rm_2/vel
   heading_topic: /rm_2/odometry/filtered
-  heading_offset: 235.5
+  velocity_rotation: 180.0
+  heading_offset: 55.5

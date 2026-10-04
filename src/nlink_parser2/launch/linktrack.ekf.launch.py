@@ -47,7 +47,9 @@ def ekf_per_robot(context):
                 '--floor-z', LaunchConfiguration('floor_z')]
         src = vel.get(robot)
         if src:
-            args += ['--vel-topic', src['velocity_topic'], '--heading-topic', src['heading_topic']]
+            args += ['--vel-topic', src['velocity_topic'], '--heading-topic', src['heading_topic'],
+                     '--mag-state-topic', src.get('mag_state_topic', f'/{robot}/imu/mag_state'),
+                     '--velocity-rotation', str(src.get('velocity_rotation', 0.0))]
             if src.get('heading_offset') is not None:
                 args += ['--heading-offset', str(src['heading_offset'])]
         nodes.append(Node(package='nlink_parser2', executable='uwb_ekf_adapter.py', output='screen',
