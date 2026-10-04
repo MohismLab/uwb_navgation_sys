@@ -1,0 +1,9 @@
+[submodule "src/nlink_parser2/extern/asio"]
+	path = src/nlink_parser2/extern/asio
+	url = https://github.com/chriskohlhoff/asio.git
+[submodule "src/nlink_parser2/src/nlink_utils/nlink_unpack"]
+	path = src/nlink_parser2/src/nlink_utils/nlink_unpack
+	url = https://github.com/nooploop-dev/nlink_unpack.git
+[submodule "src/nlink_parser2/src/nlink_utils/protocol_extracter"]
+	path = src/nlink_parser2/src/nlink_utils/protocol_extracter
+	url = https://github.com/nooploop-dev/protocol_extracter.git

@@ -1,0 +1,5 @@
+<library path="uwb_rviz_plugins">
+  <class name="uwb_rviz_plugins/UwbNavPanel" type="uwb_rviz_plugins::UwbNavPanel" base_class_type="rviz_common::Panel">
+    <description>Tune max speed / acceleration / gain / tolerance of uwb_goal_nav.py and stop the robot.</description>
+  </class>
+</library>

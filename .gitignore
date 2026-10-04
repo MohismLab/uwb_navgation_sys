@@ -1,0 +1,18 @@
+# colcon
+/build/
+/install/
+/log/
+
+# only these parts of the workspace belong to this repository
+/*
+!/.gitignore
+!/.gitmodules
+!/README.md
+!/src/
+/src/*
+!/src/nlink_parser2/
+!/src/uwb_rviz_plugins/
+!/src/docs/
+
+__pycache__/
+*.pyc
